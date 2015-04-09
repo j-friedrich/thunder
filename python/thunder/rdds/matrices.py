@@ -217,7 +217,7 @@ class RowMatrix(Series):
                     "cannot do elementwise op for shapes ("+self.nrows+","+self.ncols+") and ("+other.nrows+","+other.ncols+")")
             else:
                 return self._constructor(
-                    self.rdd.zip(other.rdd).map(lambda ((k1, x), (k2, y)): (k1, add(x, y)))).__finalize__(self)
+                    self.rdd.zip(other.rdd).map(lambda ((k1, x), (k2, y)): (k1, op(x, y)))).__finalize__(self)
         else:
             if dtype is ndarray:
                 dims = shape(other)
@@ -240,7 +240,7 @@ class RowMatrix(Series):
 
     def minus(self, other):
         """
-        Elementwise division of distributed matrices.
+        Elementwise subtraction of distributed matrices.
 
         See also
         --------
@@ -250,7 +250,7 @@ class RowMatrix(Series):
 
     def dotTimes(self, other):
         """
-        Elementwise division of distributed matrices.
+        Elementwise multiplication of distributed matrices.
 
         See also
         --------
