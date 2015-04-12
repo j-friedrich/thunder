@@ -5,6 +5,7 @@ from thunder.factorization.pca import PCA
 from thunder.factorization.svd import SVD
 from thunder.factorization.ica import ICA
 from thunder.factorization.nmf import NMF
+from thunder.factorization.fa import FA
 from thunder.regression.regress import RegressionModel
 from thunder.regression.regress import MeanRegressionModel, LinearRegressionModel, BilinearRegressionModel
 from thunder.clustering.kmeans import KMeans, KMeansModel
