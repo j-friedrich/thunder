@@ -212,7 +212,7 @@ class RowMatrix(Series):
         """
         dtype = type(other)
         if dtype is RowMatrix:
-            if (self.nrows is not other.nrows) | (self.ncols is not other.ncols):
+            if (self.nrows != other.nrows) | (self.ncols != other.ncols):
                 raise Exception(
                     "cannot do elementwise op for shapes ("+self.nrows+","+self.ncols+") and ("+other.nrows+","+other.ncols+")")
             else:
@@ -221,7 +221,7 @@ class RowMatrix(Series):
         else:
             if dtype is ndarray:
                 dims = shape(other)
-                if len(dims) > 1 or dims[0] is not self.ncols:
+                if len(dims) > 1 or dims[0] != self.ncols:
                     raise Exception(
                         "cannot do elementwise operation for shapes ("+str(self.nrows)+","+str(self.ncols)+") and " + str(dims))
             return self._constructor(
