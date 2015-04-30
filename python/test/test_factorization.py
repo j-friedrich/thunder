@@ -7,6 +7,7 @@ from thunder.factorization.ica import ICA
 from thunder.factorization.svd import SVD
 from thunder.factorization.nmf import NMF
 from thunder.factorization.pca import PCA
+from thunder.factorization.fa import FA
 from thunder.utils.datasets import DataSets
 from thunder.rdds.matrices import RowMatrix
 from test_utils import PySparkTestCase
@@ -55,6 +56,46 @@ class TestPCA(FactorizationTestCase):
         assert(allclose(out1_comps, out2_comps) | allclose(out1_comps, -out2_comps))
         assert(allclose(out1_scores, out2_scores) | allclose(out1_scores, -out2_scores))
         assert(allclose(out1_scores, out1_transform_scores))
+
+
+class TestFA(FactorizationTestCase):
+    """
+    Test execution and accuracy of FA
+
+    Compares against results using scikit learn, up to a sign flip
+    """
+    def test_fa(self):
+        dataLocal = [
+            array([1.0, 1.0, 1.0, 5.0]),
+            array([2.0, 3.0, 4.0, 1.0]),
+            array([6.0, 0.0, 6.0, 6.0])
+        ]
+        data = self.sc.parallelize(zip(range(1, 4), dataLocal))
+        mat = RowMatrix(data)
+
+        fa1r = FA(k=1, svdMethod='direct')
+        fa1r.fit(mat)
+        out1r_transform = fa1r.transform(mat).collectValuesAsArray()
+        fa1c = FA(k=1, svdMethod='direct', rowFormat=False)
+        fa1c.fit(mat)
+        out1c_transform = fa1c.transform(mat)
+
+        from sklearn.decomposition import FactorAnalysis as skFA
+        fa2r = skFA(n_components=1)
+        fa2r.fit(array(dataLocal))
+        out2r_transform = fa2r.transform(array(dataLocal))
+        fa2c = skFA(n_components=1)
+        fa2c.fit(array(dataLocal).T)
+        out2c_transform = fa2c.transform(array(dataLocal).T)
+
+        assert(allclose(fa1r.comps, fa2r.components_) | allclose(fa1r.comps, -fa2r.components_))
+        assert(allclose(fa1r.loglike, fa2r.loglike_[-1]))
+        assert(allclose(fa1r.noiseVar, fa2r.noise_variance_))
+        assert(allclose(out1r_transform, out2r_transform) | allclose(out1r_transform, -out2r_transform))
+        assert(allclose(fa1c.comps.collectValuesAsArray(), fa2c.components_.T) | allclose(fa1c.comps.collectValuesAsArray(), -fa2c.components_.T))
+        assert(allclose(fa1c.loglike, fa2c.loglike_[-1]))
+        assert(allclose(fa1c.noiseVar.collectValuesAsArray(), fa2c.noise_variance_))
+        assert(allclose(out1c_transform, out2c_transform.T) | allclose(out1c_transform, -out2c_transform.T))
 
 
 class TestSVD(FactorizationTestCase):
