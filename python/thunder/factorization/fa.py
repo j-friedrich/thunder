@@ -13,7 +13,14 @@ from scipy import linalg
 class FA(object):
 
     """
-    factor analysis on a distributed matrix.
+    Factor analysis on a distributed matrix.
+
+    The observations are assumed to be caused by a linear transformation of
+    lower dimensional latent factors and added Gaussian noise.
+    Observations can be grouped by rows or columns, indicated by the flag
+    'rowFormat', to avoid to transpose the distributed matrix.
+    Because the distributed matrix is typically tall and skinny, all matrices
+    of size (nrows,_) are of type RowMatrix.
 
     Parameters
     ----------
@@ -52,7 +59,7 @@ class FA(object):
     See also
     --------
     SVD : singular value decomposition
-    PCA : principal components analysis
+    PCA : principal component analysis
     """
 
     def __init__(self, k=3, svdMethod='auto', tol=1e-2, maxIter=1000, rowFormat=True):
@@ -90,7 +97,7 @@ class FA(object):
 
         SMALL = 1e-12
         svd = SVD(k=self.k, method=self.svdMethod)
-        if self.rowFormat:
+        if self.rowFormat:  # following along the lines of scikit learn
             mat = data.center(1).cache()
             n_samples, n_features = mat.nrows, mat.ncols
             llconst = n_features * log(2. * pi) + self.k
@@ -122,7 +129,8 @@ class FA(object):
             self.comps = W
             self.noiseVar = psi
             self.loglike = ll
-        else:
+        else:  # instead of calling above with the transposed matrix,
+               # transpose the equations
             mat = data.center(0).cache()
             n_features, n_samples = mat.nrows, mat.ncols
             llconst = n_features * log(2. * pi) + self.k
@@ -134,6 +142,8 @@ class FA(object):
             for i in xrange(self.maxIter):
                 # SMALL helps numerics
                 sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL).cache()
+                # implement diag(v)^-1 A as A.join(v).mapValues(divide)
+                # join doubles number of partitions, hence call coalesce
                 scaledmat = mat._constructor(mat.rdd.join(sqrt_psi).coalesce(numPartMat)
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
                 svd.calc(scaledmat)
@@ -142,6 +152,7 @@ class FA(object):
                     scaledmat.rdd.mapValues(var).values().collect()) - sum(s)
                 # Use 'maximum' here to avoid sqrt problems.
                 W = svd.u.dotTimes(sqrt(maximum(s - 1., 0.)))
+                # implement diag(v) A  as A.join(v).mapValues(multiply)
                 W = W.rdd.join(sqrt_psi).coalesce(W.rdd.getNumPartitions())\
                     .mapValues(lambda x: multiply(x[0], x[1]))
                 # loglikelihood
@@ -153,6 +164,7 @@ class FA(object):
                 old_ll = ll
                 psi = variance.join(W.mapValues(lambda x: sum(x ** 2))).coalesce(numPartPsi)\
                     .mapValues(lambda x: maximum(subtract(x[0], x[1]), SMALL))
+
             else:
                 raise Exception('FactorAnalysis did not converge.' +
                                 ' You might want' +
@@ -196,10 +208,13 @@ class FA(object):
             return mat.times(Wpsi.T).times(cov_z)
         else:
             mat = data.center(0)
+            # implement diag(v)^-1 A as A.join(v).mapValues(divide)
             Wpsi = self.comps.rdd.join(self.noiseVar.rdd)\
                 .mapValues(lambda x: divide(x[0], x[1]))
+            # implement A' B as B.join(A).mapValues(outer).reduce(add)
             tmp = self.comps.rdd.join(Wpsi).mapValues(
                 lambda x: outer(x[0], x[1])).values().reduce(add)
             cov_z = linalg.inv(eye(self.k) + tmp)
+            # implement A' B as B.join(A).mapValues(outer).reduce(add)
             return cov_z.dot(Wpsi.join(mat.rdd).mapValues(
                 lambda x: outer(x[0], x[1])).values().reduce(add))
