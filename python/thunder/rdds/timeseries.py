@@ -208,8 +208,8 @@ class TimeSeries(Series):
         s = s - mean(s)
         s = s / norm(s)
 
-        if size(s) != size(self.index):
-            raise Exception('Size of signal to cross correlate with, %g, does not match size of series' % size(s))
+        if len(s) != len(self.index):
+            raise Exception('Size of signal to cross correlate with, %g, does not match size of series' % len(s))
 
         # created a matrix with lagged signals
         if lag is not 0:
