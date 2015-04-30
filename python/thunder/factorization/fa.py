@@ -20,20 +20,20 @@ class FA(object):
     k : int
         Number of factors to estimate
 
-    svdMethod : str, default = "auto"
+    svdMethod : str, optional, default = "auto"
         If set to 'direct', will compute the SVD with direct gramian matrix estimation and eigenvector decomposition.
         If set to 'em', will approximate the SVD using iterative expectation-maximization algorithm.
         If set to 'auto', will use 'em' if number of columns in input data exceeds 750, otherwise will use 'direct'.
 
-    tol : float, default = 1e-2
+    tol : float, optional, default = 1e-2
         Stopping tolerance for iterative algorithm.
 
-    maxIter : int, default = 1000
+    maxIter : int, optional, default = 1000
         Maximum number of iterations.
 
-    rowFormat : boolean, default = True
+    rowFormat : boolean, optional, default = True
         If True then each row is regarded a sample, columns are features
-        If false then each column is regarded a sample, rows are features
+        If False then each column is regarded a sample, rows are features
 
 
     Attributes
@@ -91,7 +91,7 @@ class FA(object):
         SMALL = 1e-12
         svd = SVD(k=self.k, method=self.svdMethod)
         if self.rowFormat:
-            mat = data.center(1)
+            mat = data.center(1).cache()
             n_samples, n_features = mat.nrows, mat.ncols
             llconst = n_features * log(2. * pi) + self.k
             variance = data.variance()
@@ -123,17 +123,17 @@ class FA(object):
             self.noiseVar = psi
             self.loglike = ll
         else:
-            mat = data.center(0)
+            mat = data.center(0).cache()
             n_features, n_samples = mat.nrows, mat.ncols
             llconst = n_features * log(2. * pi) + self.k
-            variance = mat.rdd.mapValues(var)
+            variance = mat.rdd.mapValues(var).cache()
             psi = variance.mapValues(lambda x: 1.)
             old_ll = -inf
             numPartMat = mat.rdd.getNumPartitions()
             numPartPsi = psi.getNumPartitions()
             for i in xrange(self.maxIter):
                 # SMALL helps numerics
-                sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL)
+                sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL).cache()
                 scaledmat = mat._constructor(mat.rdd.join(sqrt_psi).coalesce(numPartMat)
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
                 svd.calc(scaledmat)
@@ -196,14 +196,10 @@ class FA(object):
             return mat.times(Wpsi.T).times(cov_z)
         else:
             mat = data.center(0)
-            # Wpsi = self.comps.rdd.join(self.noiseVar.rdd)\
-            #     .coalesce(self.comps.rdd.getNumPartitions())\
-            #     .mapValues(lambda x: divide(x[0], x[1]))
             Wpsi = self.comps.rdd.join(self.noiseVar.rdd)\
                 .mapValues(lambda x: divide(x[0], x[1]))
             tmp = self.comps.rdd.join(Wpsi).mapValues(
                 lambda x: outer(x[0], x[1])).values().reduce(add)
             cov_z = linalg.inv(eye(self.k) + tmp)
-            tmp2 = Wpsi.join(mat.rdd).mapValues(
-                lambda x: outer(x[0], x[1])).values().reduce(add)
-            return cov_z.dot(tmp2)
+            return cov_z.dot(Wpsi.join(mat.rdd).mapValues(
+                lambda x: outer(x[0], x[1])).values().reduce(add))
