@@ -111,6 +111,7 @@ class FA(object):
                 # SMALL helps numerics
                 sqrt_psi = sqrt(psi) + SMALL
                 scaledmat = mat.dotDivide(sqrt_psi)
+                scaledmat.cache()
                 svd.calc(scaledmat)
                 s = svd.s ** 2 / n_samples
                 unexp_var = scaledmat.variance().sum() - sum(s)
@@ -149,6 +150,7 @@ class FA(object):
                 # join auto doubles number of partitions, hence specify
                 scaledmat = mat._constructor(mat.rdd.join(sqrt_psi, numPart)
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
+                scaledmat.cache()
                 svd.calc(scaledmat)
                 s = svd.s ** 2 / n_samples
                 unexp_var = scaledmat.rdd.mapValues(var).values().reduce(add) - sum(s)
