@@ -143,8 +143,8 @@ class FA(object):
                 # SMALL helps numerics
                 sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL).cache()
                 # implement diag(v)^-1 A as A.join(v).mapValues(divide)
-                # join doubles number of partitions, hence call coalesce
-                scaledmat = mat._constructor(mat.rdd.join(sqrt_psi).coalesce(numPartMat)
+                # join auto doubles number of partitions, hence specify
+                scaledmat = mat._constructor(mat.rdd.join(sqrt_psi, numPartMat)
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
                 svd.calc(scaledmat)
                 s = svd.s ** 2 / n_samples
@@ -153,7 +153,7 @@ class FA(object):
                 # Use 'maximum' here to avoid sqrt problems.
                 W = svd.u.dotTimes(sqrt(maximum(s - 1., 0.)))
                 # implement diag(v) A  as A.join(v).mapValues(multiply)
-                W = W.rdd.join(sqrt_psi).coalesce(W.rdd.getNumPartitions())\
+                W = W.rdd.join(sqrt_psi, W.rdd.getNumPartitions())\
                     .mapValues(lambda x: multiply(x[0], x[1]))
                 # loglikelihood
                 ll = llconst + sum(log(s))
@@ -162,7 +162,7 @@ class FA(object):
                 if (ll - old_ll) < self.tol:
                     break
                 old_ll = ll
-                psi = variance.join(W.mapValues(lambda x: sum(x ** 2))).coalesce(numPartPsi)\
+                psi = variance.join(W.mapValues(lambda x: sum(x ** 2)), numPartPsi)\
                     .mapValues(lambda x: maximum(subtract(x[0], x[1]), SMALL))
 
             else:
