@@ -68,6 +68,7 @@ class FA(object):
         self.tol = tol
         self.maxIter = maxIter
         self.rowFormat = rowFormat
+        self.svdMaxIter = 20
         self.comps = None
         self.noiseVar = None
         self.loglike = None
@@ -96,7 +97,8 @@ class FA(object):
             data = data.toRowMatrix()
 
         SMALL = 1e-12
-        svd = SVD(k=self.k, method=self.svdMethod)
+        # use standard values for SVD, could instead maybe match tolerance of SVD to tol
+        svd = SVD(k=self.k, method=self.svdMethod, maxIter=self.svdMaxIter)
         if self.rowFormat:  # following along the lines of scikit learn
             mat = data.center(1).cache()
             n_samples, n_features = mat.nrows, mat.ncols
@@ -105,6 +107,7 @@ class FA(object):
             psi = ones(n_features)
             old_ll = -inf
             for i in xrange(self.maxIter):
+                svd.maxIter = min(2*i+1, self.svdMaxIter)
                 # SMALL helps numerics
                 sqrt_psi = sqrt(psi) + SMALL
                 scaledmat = mat.dotDivide(sqrt_psi)
@@ -137,14 +140,14 @@ class FA(object):
             variance = mat.rdd.mapValues(var).cache()
             psi = variance.mapValues(lambda x: 1.)
             old_ll = -inf
-            numPartMat = mat.rdd.getNumPartitions()
-            numPartPsi = psi.getNumPartitions()
+            numPart = mat.rdd.getNumPartitions()
             for i in xrange(self.maxIter):
+                svd.maxIter = min(2*i+1, self.svdMaxIter)
                 # SMALL helps numerics
                 sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL).cache()
                 # implement diag(v)^-1 A as A.join(v).mapValues(divide)
                 # join auto doubles number of partitions, hence specify
-                scaledmat = mat._constructor(mat.rdd.join(sqrt_psi, numPartMat)
+                scaledmat = mat._constructor(mat.rdd.join(sqrt_psi, numPart)
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
                 svd.calc(scaledmat)
                 s = svd.s ** 2 / n_samples
@@ -152,7 +155,7 @@ class FA(object):
                 # Use 'maximum' here to avoid sqrt problems.
                 W = svd.u.dotTimes(sqrt(maximum(s - 1., 0.)))
                 # implement diag(v) A  as A.join(v).mapValues(multiply)
-                W = W.rdd.join(sqrt_psi, W.rdd.getNumPartitions())\
+                W = W.rdd.join(sqrt_psi, numPart)\
                     .mapValues(lambda x: multiply(x[0], x[1]))
                 # loglikelihood
                 ll = llconst + sum(log(s))
@@ -161,7 +164,7 @@ class FA(object):
                 if (ll - old_ll) < self.tol:
                     break
                 old_ll = ll
-                psi = variance.join(W.mapValues(lambda x: sum(x ** 2)), numPartPsi)\
+                psi = variance.join(W.mapValues(lambda x: sum(x ** 2)), numPart)\
                     .mapValues(lambda x: maximum(subtract(x[0], x[1]), SMALL))
 
             else:
