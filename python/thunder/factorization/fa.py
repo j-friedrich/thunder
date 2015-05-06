@@ -148,8 +148,7 @@ class FA(object):
                                              .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
                 svd.calc(scaledmat)
                 s = svd.s ** 2 / n_samples
-                unexp_var = sum(
-                    scaledmat.rdd.mapValues(var).values().collect()) - sum(s)
+                unexp_var = scaledmat.rdd.mapValues(var).values().reduce(add) - sum(s)
                 # Use 'maximum' here to avoid sqrt problems.
                 W = svd.u.dotTimes(sqrt(maximum(s - 1., 0.)))
                 # implement diag(v) A  as A.join(v).mapValues(multiply)
@@ -157,7 +156,7 @@ class FA(object):
                     .mapValues(lambda x: multiply(x[0], x[1]))
                 # loglikelihood
                 ll = llconst + sum(log(s))
-                ll += unexp_var + sum(psi.mapValues(log).values().collect())
+                ll += unexp_var + psi.mapValues(log).values().reduce(add)
                 ll *= -n_samples / 2.
                 if (ll - old_ll) < self.tol:
                     break
