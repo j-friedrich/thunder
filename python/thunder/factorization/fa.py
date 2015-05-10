@@ -1,5 +1,7 @@
 """
 Class for Factor Analysis
+
+requires spark 1.3.1
 """
 
 from thunder.factorization.svd import SVD
@@ -97,7 +99,8 @@ class FA(object):
             data = data.toRowMatrix()
 
         SMALL = 1e-12
-        # use standard values for SVD, could instead maybe match tolerance of SVD to tol
+        # use standard values for SVD, could instead maybe match tolerance of
+        # SVD to tol
         svd = SVD(k=self.k, method=self.svdMethod, maxIter=self.svdMaxIter)
         if self.rowFormat:  # following along the lines of scikit learn
             mat = data.center(1).cache()
@@ -107,7 +110,7 @@ class FA(object):
             psi = ones(n_features)
             old_ll = -inf
             for i in xrange(self.maxIter):
-                svd.maxIter = min(2*i+1, self.svdMaxIter)
+                # svd.maxIter = min(2*i+1, self.svdMaxIter) # perfrom less iterations in the inner loop initially
                 # SMALL helps numerics
                 sqrt_psi = sqrt(psi) + SMALL
                 scaledmat = mat.dotDivide(sqrt_psi)
@@ -141,24 +144,23 @@ class FA(object):
             variance = mat.rdd.mapValues(var).cache()
             psi = variance.mapValues(lambda x: 1.)
             old_ll = -inf
-            numPart = mat.rdd.getNumPartitions()
             for i in xrange(self.maxIter):
-                svd.maxIter = min(2*i+1, self.svdMaxIter)
+                # svd.maxIter = min(2*i+1, self.svdMaxIter) # perfrom less iterations in the inner loop initially
                 # SMALL helps numerics
-                sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL).cache()
-                # implement diag(v)^-1 A as A.join(v).mapValues(divide)
-                # join auto doubles number of partitions, hence specify
-                scaledmat = mat._constructor(mat.rdd.join(sqrt_psi, numPart)
-                                             .mapValues(lambda x: divide(x[0], x[1]))).__finalize__(mat)
+                sqrt_psi = psi.mapValues(lambda x: sqrt(x) + SMALL)
+                # implement diag(v)^-1 A as A.zip(v).map(divide)
+                scaledmat = mat.rdd.zip(sqrt_psi).map(
+                    lambda ((k1, x), (k2, y)): (k1, divide(x, y)))
                 scaledmat.cache()
-                svd.calc(scaledmat)
+                svd.calc(mat._constructor(scaledmat))
                 s = svd.s ** 2 / n_samples
-                unexp_var = scaledmat.rdd.mapValues(var).values().reduce(add) - sum(s)
+                unexp_var = scaledmat.mapValues(
+                    var).values().reduce(add) - sum(s)
                 # Use 'maximum' here to avoid sqrt problems.
                 W = svd.u.dotTimes(sqrt(maximum(s - 1., 0.)))
-                # implement diag(v) A  as A.join(v).mapValues(multiply)
-                W = W.rdd.join(sqrt_psi, numPart)\
-                    .mapValues(lambda x: multiply(x[0], x[1]))
+                # implement diag(v) A  as A.zip(v).map(multiply)
+                W = W.rdd.zip(sqrt_psi).map(
+                    lambda ((k1, x), (k2, y)): (k1, multiply(x, y)))
                 # loglikelihood
                 ll = llconst + sum(log(s))
                 ll += unexp_var + psi.mapValues(log).values().reduce(add)
@@ -166,17 +168,15 @@ class FA(object):
                 if (ll - old_ll) < self.tol:
                     break
                 old_ll = ll
-                psi = variance.join(W.mapValues(lambda x: sum(x ** 2)), numPart)\
-                    .mapValues(lambda x: maximum(subtract(x[0], x[1]), SMALL))
+                psi = variance.zip(W.mapValues(lambda x: sum(x ** 2)))\
+                    .map(lambda ((k1, x), (k2, y)): (k1, maximum(subtract(x, y), SMALL)))
 
             else:
                 raise Exception('FactorAnalysis did not converge.' +
                                 ' You might want' +
                                 ' to increase the number of iterations.')
-            self.comps = mat._constructor(
-                W.sortByKey(), ncols=self.k).__finalize__(mat)
-            self.noiseVar = mat._constructor(
-                psi.sortByKey(), ncols=1).__finalize__(mat)
+            self.comps = mat._constructor(W, ncols=self.k).__finalize__(mat)
+            self.noiseVar = mat._constructor(psi, ncols=1).__finalize__(mat)
             self.loglike = ll
 
         return self
@@ -212,13 +212,15 @@ class FA(object):
             return mat.times(Wpsi.T).times(cov_z)
         else:
             mat = data.center(0)
-            # implement diag(v)^-1 A as A.join(v).mapValues(divide)
-            Wpsi = self.comps.rdd.join(self.noiseVar.rdd)\
-                .mapValues(lambda x: divide(x[0], x[1]))
-            # implement A' B as B.join(A).mapValues(outer).reduce(add)
-            tmp = self.comps.rdd.join(Wpsi).mapValues(
-                lambda x: outer(x[0], x[1])).values().reduce(add)
+            # implement diag(v)^-1 A as A.zip(v).map(divide)
+            Wpsi = self.comps.rdd.zip(self.noiseVar.rdd)\
+                .map(lambda ((k1, x), (k2, y)): (k1, divide(x, y)))
+            # implement A' B as A.zip(B).map(outer).reduce(add)
+            # this is faster than tmp = comps.times(mat._constructor(Wpsi))
+            tmp = self.comps.rdd.zip(Wpsi).map(
+                lambda ((k1, x), (k2, y)): outer(x, y)).reduce(add)
             cov_z = linalg.inv(eye(self.k) + tmp)
-            # implement A' B as B.join(A).mapValues(outer).reduce(add)
-            return cov_z.dot(Wpsi.join(mat.rdd).mapValues(
-                lambda x: outer(x[0], x[1])).values().reduce(add))
+            # implement A' B as A.zip(B).map(outer).reduce(add)
+            # again faster than calling times on RowMatrix
+            return cov_z.dot(Wpsi.zip(mat.rdd).map(
+                lambda ((k1, x), (k2, y)): outer(x, y)).reduce(add))
