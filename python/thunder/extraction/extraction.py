@@ -10,12 +10,14 @@ class SourceExtraction(object):
 
         from thunder.extraction.block.methods.nmf import BlockNMF
         from thunder.extraction.block.methods.sima import BlockSIMA
+        from thunder.extraction.block.methods.grouplasso import BlockGroupLasso
         from thunder.extraction.feature.methods.localmax import LocalMax
 
         EXTRACTION_METHODS = {
             'nmf': BlockNMF,
             'localmax': LocalMax,
-            'sima': BlockSIMA
+            'sima': BlockSIMA,
+            'grouplasso': BlockGroupLasso,
         }
 
         checkParams(method, EXTRACTION_METHODS.keys())
