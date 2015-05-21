@@ -33,6 +33,23 @@ class TestBlockMethod(PySparkTestCase):
         cond2 = (model[0].distance([40, 40]) < ep) and (model[1].distance([20, 20]) < ep)
         assert(cond1 or cond2)
 
+    def test_grouplasso(self):
+        """
+        (BlockMethod) grouplasso with defaults
+        """
+        tsc = ThunderContext(self.sc)
+        data = tsc.makeExample('sources', dims=(60, 60), centers=[[20, 20], [40, 40]], noise=0.1, seed=42)
+
+        model = SourceExtraction('grouplasso', sig=(3, 3)).fit(data, size=(30, 30))
+
+        assert(model.count == 2)
+
+        # order is irrelevant, but one of these must be true
+        ep = 1.0
+        cond1 = (model[0].distance([20, 20]) < ep) and (model[1].distance([40, 40]) < ep)
+        cond2 = (model[0].distance([40, 40]) < ep) and (model[1].distance([20, 20]) < ep)
+        assert(cond1 or cond2)
+
     @unittest.skipIf(not _have_sima, "SIMA not installed or not functional")
     def test_sima(self):
         """

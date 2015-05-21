@@ -25,7 +25,7 @@ class GroupLassoBlockAlgorithm(BlockAlgorithm):
     ----------
     sig : tuple of ints, shape (D,)
         estimated radius of the neurons in each dimension (e.g., 5 pixels)
-    lam : float, optional, default = .5
+    lam : float, optional, default = 1.
         Regularization parameter which controls the spatial sparsity
         (initial estimate if targetAreaRatio is non-empty)
     tol : float, optional, default = .01
@@ -44,7 +44,7 @@ class GroupLassoBlockAlgorithm(BlockAlgorithm):
         Print progress if true
     """
 
-    def __init__(self, sig, lam=0.5, tol=1e-2, maxIter=30, nonNegative=True, targetAreaRatio=[],
+    def __init__(self, sig, lam=1., tol=1e-2, maxIter=30, nonNegative=True, targetAreaRatio=[],
                  featureCreator=lambda x: percentile(x, 90), verbose=False, **extra):
         self.sig = sig
         self.lam = lam
@@ -192,6 +192,8 @@ class GroupLassoBlockAlgorithm(BlockAlgorithm):
             return asarray(where(local_max)).T
 
         x = gaussian_group_lasso(block)
+        if x.max() == 0:  # no neuron in block
+            return []
         pic_x = apply_along_axis(self.featureCreator, 0, x)
         # centers extracted from fista output using LocalMax
         cent = getCenters(pic_x)
