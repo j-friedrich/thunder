@@ -3,10 +3,12 @@ from thunder.extraction.source import SourceModel
 
 
 class BasicBlockMerger(BlockMerger):
+
     """
     Simple merger that combines sources directly
     without any merging or modification
     """
+
     def __init__(self, **extra):
         pass
 
@@ -48,6 +50,7 @@ class BasicBlockMerger(BlockMerger):
 
 
 class OverlapBlockMerger(BlockMerger):
+
     """
     Merger that combines sources across blocks by
     merging sources that overlap with sources in neighboring blocks
@@ -57,6 +60,7 @@ class OverlapBlockMerger(BlockMerger):
     overlap : scalar, optional, default = 0.5
         Degree of overlap requires for sources to be merged
     """
+
     def __init__(self, overlap=0.5, **extra):
         self.overlap = overlap
 
@@ -107,11 +111,58 @@ class OverlapBlockMerger(BlockMerger):
                 for key in neighbors:
                     ind = d[key]
                     for other in blocks[ind][:]:
-                        if source.overlap(other) > self.overlap and other.area < source.area:
+                        if source.overlap(other) > self.overlap and other.area <= source.area:
                             source.merge(other)
                             blocks[ind].remove(other)
 
         chain = itertools.chain.from_iterable(blocks)
         sources = list(chain)
+
+        return SourceModel(sources)
+
+
+class IgnorePaddingBlockMerger(BlockMerger):
+
+    """
+    Merger that combines sources across blocks by
+    ignoring sources in padded regions to avoid duplicates
+
+    """
+
+    def __init__(self, **extra):
+        pass
+
+    def merge(self, blocks, keys):
+        """
+        Parameters
+        ----------
+        blocks : list of lists of sources
+            List of the sources found for each block; every block
+            should be represented, with an empty list for blocks
+            without any identified sources
+
+        keys : List of PaddedBlockGroupingKeys
+            The keys for each of the blocks assocaited with the sources
+
+        Returns
+        -------
+        SourceModel containing the combined list of merged sources
+        """
+        from thunder.rdds.imgblocks.blocks import PaddedBlockGroupingKey
+
+        # check that keys are from padded blocks
+        if not all(isinstance(k, PaddedBlockGroupingKey) for k in keys):
+            raise ValueError("All keys must correspond to padded blocks for this merger")
+
+        sources = []
+        for ib, blk in enumerate(blocks):
+            iS = keys[ib].imgSlices[1:]
+            for source in blk:
+                # re-center coordinates
+                source.coordinates += keys[ib].spatialKey
+                source.coordinates -= keys[ib].padding[0]
+                # add only if center not in padded region
+                if all([i.start <= source.center[j] < i.stop for j, i in enumerate(iS)]):
+                    sources += [source]
 
         return SourceModel(sources)

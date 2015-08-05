@@ -3,22 +3,22 @@ from thunder.extraction.source import SourceModel
 
 
 class SourceExtraction(object):
-    """
-    Factory for constructing source extraction methods.
 
-    Returns a source extraction method given a string identifier.
-    Options include: 'nmf', 'localmax', 'sima'
+    """
+    Factory for constructing source extraction methods
     """
     def __new__(cls, method, **kwargs):
 
         from thunder.extraction.block.methods.nmf import BlockNMF
         from thunder.extraction.block.methods.sima import BlockSIMA
+        from thunder.extraction.block.methods.sparsegaussian import BlockSparseGaussian
         from thunder.extraction.feature.methods.localmax import LocalMax
 
         EXTRACTION_METHODS = {
             'nmf': BlockNMF,
             'localmax': LocalMax,
-            'sima': BlockSIMA
+            'sima': BlockSIMA,
+            'sparsegaussian': BlockSparseGaussian
         }
 
         checkParams(method, EXTRACTION_METHODS.keys())
