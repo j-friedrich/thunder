@@ -273,7 +273,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
             return peaks
 
         if self.registration:  # perform registration on block using crosscorrelation
-            from thunder.imgprocessing.regmethods.utils import computeDisplacement
+            from thunder.registration.methods.utils import computeDisplacement
             from scipy.ndimage.interpolation import shift
             T = len(block)
             # compute reference image

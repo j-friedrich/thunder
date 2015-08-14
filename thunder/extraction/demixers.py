@@ -264,7 +264,7 @@ class LocalNMFBlockAlgorithm(object):
         key = block[0]
         data = block[1]
         if self.registration:
-            from thunder.imgprocessing.regmethods.utils import computeDisplacement
+            from thunder.registration.methods.utils import computeDisplacement
             from scipy.ndimage.interpolation import shift
             T = len(data)
             # compute reference image
