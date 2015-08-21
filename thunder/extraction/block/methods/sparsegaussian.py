@@ -32,7 +32,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     tol : float, optional, default = .01
         Tolerance for stopping FISTA
 
-    maxIter : int, optional, default = 100
+    maxIter : int, optional, default = 20
         Maximum number of iterations
 
     nonNegative : boolean, optional, default = True
@@ -45,10 +45,10 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     method : str, optional, default = 'percentile'
             Method to create single image, options are 'percentile', 'mean', 'stdev'
 
-    perc : int, optional, default = 95
+    perc : int, optional, default = 98
         Percentile used to obtain single image
 
-    minDistance : int, optional, default = 2
+    minDistance : int, optional, default = 3
         Minimum distance between source centers
 
     adaptBackground : boolean, optional, default = True
@@ -65,8 +65,8 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
 
     """
 
-    def __init__(self, sig, lam=1., tol=1e-2, maxIter=100, nonNegative=True, targetAreaRatio=[],
-                 method='percentile', perc=95, minDistance=2, adaptBackground=True,
+    def __init__(self, sig, lam=1., tol=1e-2, maxIter=20, nonNegative=True, targetAreaRatio=[],
+                 method='percentile', perc=98, minDistance=3, adaptBackground=True,
                  getROI=False, verbose=False, registration=False, **extra):
         checkParams(method, ['mean', 'stdev', 'percentile'])
         self.sig = sig
