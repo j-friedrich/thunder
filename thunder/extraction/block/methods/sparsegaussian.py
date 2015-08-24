@@ -43,7 +43,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
         (sparsisty) of xk is between targetAreaRatio[0] and targetAreaRatio[1]
 
     method : str, optional, default = 'percentile'
-            Method to create single image, options are 'percentile', 'mean', 'stdev'
+        Method to create single image, options are 'percentile', 'mean', 'stdev'
 
     perc : int, optional, default = 98
         Percentile used to obtain single image
@@ -63,11 +63,13 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     registration : boolean, optional, default = False
         Blockwise registration using crosscorrelation if true
 
+    batchSize : boolean, optional, default = 10
+        Number of frames over which max is taken prior to Gaussian group lasso
     """
 
     def __init__(self, sig, lam=1., tol=1e-2, maxIter=20, nonNegative=True, targetAreaRatio=[],
                  method='percentile', perc=98, minDistance=3, adaptBackground=True,
-                 getROI=False, verbose=False, registration=False, **extra):
+                 getROI=False, verbose=False, registration=False, batchSize=10, **extra):
         checkParams(method, ['mean', 'stdev', 'percentile'])
         self.sig = sig
         self.lam = lam
@@ -82,6 +84,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
         self.getROI = getROI
         self.verbose = verbose
         self.registration = registration
+        self.batchSize = batchSize
 
     def extract(self, block):
         from numpy import zeros, ones, maximum, shape, std, sum, percentile, dot, outer,\
@@ -215,7 +218,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
                         b_t, b_s = greedyNNPCA(data - r, b_s, 3)
                 else:
                     qk = - 2 / L * A(yk, transpose=[False, True]) + v
-                xk = prox(yk+qk, lam / L)
+                xk = prox(yk + qk, lam / L)
                 tk1 = (1 + sqrt(1 + 4 * (tk ** 2))) / 2
                 yk = xk + (tk - 1) / tk1 * (xk - xk1)
 
@@ -283,6 +286,11 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
                 ref = block[int(T / 2) - 10:int(T / 2) + 10].mean(0)
             block = asarray(map(lambda im:
                                 shift(im, computeDisplacement(ref, im), mode='nearest'), block))
+
+        if self.batchSize > 1:
+            block = asarray([block[self.batchSize * i:self.batchSize * (i + 1)].max(0)
+                             for i in range(int(len(block) / self.batchSize))])
+
         x = gaussianGroupLasso(block)
         if x.max() == 0:  # no source in block
             return []
