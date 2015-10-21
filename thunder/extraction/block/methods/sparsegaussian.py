@@ -63,7 +63,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     registration : boolean, optional, default = False
         Blockwise registration using crosscorrelation if true
 
-    batchSize : boolean, optional, default = 10
+    batchSize : int, optional, default = 10
         Number of frames over which max is taken prior to Gaussian group lasso
     """
 
@@ -269,7 +269,8 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
         def getCenters(im):
             # apply the local maximum filter
             from skimage.feature import peak_local_max
-            peaks = peak_local_max(im, min_distance=self.minDistance, threshold_rel=.03).T
+            peaks = peak_local_max(im, min_distance=self.minDistance,
+                                   threshold_rel=.03, exclude_border=False).T
             magnitude = im[list(peaks)]
             indices = argsort(magnitude)[::-1]
             peaks = asarray(list(peaks[:, indices]) + [magnitude[indices]]).T
@@ -288,8 +289,8 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
                                 shift(im, computeDisplacement(ref, im), mode='nearest'), block))
 
         if self.batchSize > 1:
-            block = asarray([block[self.batchSize * i:self.batchSize * (i + 1)].max(0)
-                             for i in range(int(len(block) / self.batchSize))])
+            block = block[:int(len(block) / self.batchSize) *
+                          self.batchSize].reshape((-1, self.batchSize) + block.shape[1:]).max(1)
 
         x = gaussianGroupLasso(block)
         if x.max() == 0:  # no source in block

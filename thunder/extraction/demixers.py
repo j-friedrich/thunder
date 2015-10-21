@@ -1,7 +1,8 @@
 from thunder.rdds.images import Images
 from thunder.rdds.imgblocks.blocks import Blocks, PaddedBlocks
 from thunder.rdds.timeseries import TimeSeries
-from numpy import dot, outer, asarray, argsort
+from thunder.utils.common import smallestFloatType
+from numpy import asarray, argsort
 
 
 class Demixer(object):
@@ -13,7 +14,7 @@ class Demixer(object):
     def __init__(self, **kwargs):
         self.algorithm = LocalNMFBlockAlgorithm(**kwargs)
 
-    def fit(self, blocks, sources, output='series', size=None, units="pixels", padding=0):
+    def fit(self, blocks, sources, size=None, units="pixels", padding=0):
         """
         Fit the demixing model to data
 
@@ -24,9 +25,6 @@ class Demixer(object):
 
         sources : SourceModel
             containing the combined list of sources
-
-        output : string, optional, default = 'series'
-            whether to return 'series' or 'blocks'
 
         size : tuple, optional, default = (50,50,1)
             Block size if converting from images
@@ -39,10 +37,10 @@ class Demixer(object):
 
         Returns
         -------
-        dependent on 'output'
         TimeSeries containing the Sources as keys and their
-            activities as values, or
-        (Padded)Blocks with tuple (Sources, activities) as values
+            activities as values, and optionally
+        (Padded)Blocks with tuple (*extras) as values
+            if algorithm returns additional output, e.g. the background
 
         See also
         --------
@@ -64,131 +62,12 @@ class Demixer(object):
                                                              for s in sources])[::-1]]))
         except AttributeError:  # if sources don't have values
             centers_b = blocks.rdd.context.broadcast(sources.centers)
-        result = blocks.apply(lambda x: algorithm.demix(x, centers_b,
-                                                        False if output == 'series' else True))
-        if output == 'series':
+        result = blocks.apply(lambda x: algorithm.demix(x, centers_b, False))
+        if len(result.values().first()) == 2:
             return TimeSeries(result.values().flatMap(lambda x: zip(x[0], x[1])))
         else:
-            return result
-
-    def mergeBlocksToTimeSeries(self, fit):
-        """
-        Convert demixing model from blocks to TimeSeries
-
-        Parameters
-        ----------
-        fit : Blocks, PaddedBlocks
-             Tuples (Sources, activities) obtained from method 'fit'
-
-        Returns
-        -------
-        TimeSeries containing the Sources as keys and their activities as values
-        """
-        if isinstance(fit, PaddedBlocks):
-            # we remove sources in the padded regions and
-            # keep only the ones in the center to avoid duplicates
-            # akin to IgnorePaddingBlockMerger without call of collect()
-            def removePaddedSources(keySourcesActivity):
-                iS = keySourcesActivity[0].imgSlices[1:]
-                centers = map(lambda a: a.center, keySourcesActivity[1][0])
-                inImgSlice = asarray(map(lambda c: all([i.start <= c[j] <= i.stop - 1
-                                                        for j, i in enumerate(iS)]), centers))
-                return [keySourcesActivity[1][0][i] for i, k in enumerate(inImgSlice) if k],\
-                    keySourcesActivity[1][1][inImgSlice]
-            series = fit.rdd.map(removePaddedSources)
-        else:
-            series = fit.values()
-        return TimeSeries(series.flatMap(lambda x: zip(x[0], x[1])))
-
-    def normalizeShape(self, series):
-        """
-        Normalize shapes such that L2-norm equals 1
-
-        Parameters
-        ----------
-        series : TimeSeries
-            containing the Sources as keys and their activities as values
-
-        Returns
-        -------
-        TimeSeries containing the Sources as keys and their activities as values
-        """
-        from numpy.linalg import norm
-
-        def normalize(sa):
-            source, activity = sa
-            n = norm(source.values)
-            source.values /= n
-            activity *= n
-            return source, activity
-        return series.apply(normalize)
-
-    def subtractBackground(self, blocks, fit, size=None, units="pixels", padding=0):
-        """
-        Subtract background based on rank 1 NMF of the demixing model's residual
-
-        Parameters
-        ----------
-        blocks : Blocks, PaddedBlocks, or Images
-            Data in blocks, Images will automatically be converted to blocks
-
-        fit : Blocks, PaddedBlocks (same as 'blocks')
-             Tuples (Sources, activities) obtained from method 'fit'
-
-        size : tuple, optional, default = (50,50,1)
-            Block size if converting from images
-
-        units : string, optional, default = "pixels"
-            Units for block size specification if converting from images
-
-        padding : int or tuple, optional, default = 0
-            Amount of padding if converting from images
-
-        Returns
-        -------
-        (Padded)Blocks of the data with removed background
-
-        See also
-        --------
-        Images.toBlocks
-        """
-        if isinstance(blocks, Images):
-            if size is None:
-                raise Exception(
-                    "Must specify a size if images will be converted to blocks")
-            blocks = blocks.toBlocks(size, units, padding)
-
-        elif not (isinstance(blocks, Blocks) or isinstance(blocks, PaddedBlocks)):
-            raise Exception("Input must be Images, Blocks, or PaddedBlocks")
-
-        res2 = blocks.rdd.zip(fit.values())
-
-        def foo(datafit):
-            (key, data), (source, activity) = datafit
-            try:  # PaddedBlock
-                pIS = key.padImgSlices[1:]
-            except:
-                pIS = key.imgSlices[1:]
-            shift = asarray([p.start for p in pIS])
-            denoised_data = 0 * data
-            for i, s in enumerate(source):
-                for j, c in enumerate(s.coordinates - shift):
-                    denoised_data[(slice(0, None),) + tuple(c)] += s.values[j] * activity[i]
-            residual = data - denoised_data
-            residual.shape = (len(residual), -1)
-            b_t = residual.mean(1)
-            b_t[b_t < 0] = 0
-            for _ in range(5):
-                b_s = dot(residual.T, b_t) / dot(b_t, b_t)
-                b_s[b_s < 0] = 0
-                b_t = dot(residual, b_s) / dot(b_s, b_s)
-                b_t[b_t < 0] = 0
-            return key, (data - outer(b_t, b_s).reshape(data.shape))
-
-        if isinstance(blocks, PaddedBlocks):
-            return PaddedBlocks(res2.map(foo))
-        else:
-            return Blocks(res2.map(foo))
+            return (TimeSeries(result.values().flatMap(lambda x: zip(x[0], x[1]))),
+                    result.applyValues(lambda x: x[2:]))
 
 
 class LocalNMFBlockAlgorithm(object):
@@ -199,19 +78,19 @@ class LocalNMFBlockAlgorithm(object):
     Parameters
     ----------
     sig : tuple, shape (D,)
-        size of the gaussian kernel in different spatial directions
+        Size of the gaussian kernel in different spatial directions
 
     nonNegative : boolean, optional, default = True
-        if True, sources should be considered as non-negative
+        If True, sources should be considered as non-negative
 
     tol : float, optional, default = 1e-6
-        tolerance for stopping algorithm
+        Tolerance for stopping algorithm
 
-    maxIter : int, optional, default = 100
-        maximum number of iterations
+    iters : int, optional, default = 10
+        Number of final iterations on full data
 
     verbose : boolean, optional, default = False
-        print progress if true
+        Print progress if true
 
     registration : boolean, optional, default = False
         Blockwise registration using crosscorrelation if true
@@ -222,18 +101,31 @@ class LocalNMFBlockAlgorithm(object):
     optimizeCenters : boolean, optional, default = False
         If true, update centers to be center of mass for each source
         and prune wrongly suspected sources
+
+    initIters : list, optional, default = 80
+        Numbers of initial iterations on downsampled data
+
+    batchSize : int, optional, default = 30
+        Number of frames over which mean is taken in initial iterations
+
+    downSample : tuple, shape (D,)
+        Factor for spatial downsampling in different spatial directions
     """
 
-    def __init__(self, sig, nonNegative=True, tol=1e-6, maxIter=100, verbose=False,
-                 registration=False, adaptBackground=True, optimizeCenters=False):
+    def __init__(self, sig, nonNegative=True, tol=1e-6, iters=10, verbose=False,
+                 registration=False, adaptBackground=True, optimizeCenters=False,
+                 initIters=80, batchSize=30, downSample=None):
         self.sig = asarray(sig)
         self.nonNegative = nonNegative
         self.tol = tol
-        self.maxIter = maxIter
+        self.iters = iters
         self.verbose = verbose
         self.registration = registration
         self.adaptBackground = adaptBackground
         self.optimizeCenters = optimizeCenters
+        self.initIters = initIters
+        self.batchSize = batchSize
+        self.downSample = downSample
 
     # main function
     def demix(self, block, allcenters, returnPadded=False):
@@ -248,16 +140,22 @@ class LocalNMFBlockAlgorithm(object):
 
         Returns
         -------
-        tuple (key, (sources, activities)), where
+        tuple (key, (sources, activities[, sptlBckgrd, tmprlBckgrd])), where
             sources : list of Sources, shape(L,)
-                the shape vectors
+                shape vectors
             activity : array, shape (L, T)
-                the activity for each source
+                activity for each source
+            sptlBckgrd : array, shape (X, Y[, Z])
+                spatial background
+            tmprlBckgrd : array, shape (T,)
+                temporal background activity
+
         """
-        from numpy import sum, zeros, ones, asarray, reshape, r_, ix_, exp, arange, dot,\
-            outer, where, diff, max, nan_to_num, ravel, vstack, round, any, percentile
+        from numpy import sum, zeros, ones, asarray, reshape, r_, ix_, exp, arange, mean, dot, prod,\
+            where, max, nan_to_num, round, any, percentile, sqrt, allclose, repeat, zeros_like
         from numpy.linalg import norm
         from scipy.ndimage.measurements import center_of_mass
+        from scipy.signal import welch
         from thunder.extraction.source import Source
 
         # Initialize Parameters
@@ -282,20 +180,25 @@ class LocalNMFBlockAlgorithm(object):
         tmp = filter(lambda c: all([p.start <= c[j] < p.stop
                                     for j, p in enumerate(pIS)]), allcenters.value)
         # shift from absolute to box coordinates
-        centers = map(lambda x: x - [p.start for p in pIS], tmp)
+        centers = asarray(map(lambda x: x - [p.start for p in pIS], tmp), dtype=int)
         inImgSlice = map(lambda c: all([i.start <= c[j] + pIS[j].start < i.stop
                                         for j, i in enumerate(iS)]), centers)
         if len(centers) == 0:
             return key, ([], [])
         dims = data.shape
         D = len(dims)
-        # size of bounding box is 4 times size of source
-        R = 4 * self.sig
+        # size of bounding box is 3 times size of source
+        R = 3 * self.sig
         L = len(centers)
         shapes = []
-        activity = zeros((L, dims[0]))
+        mask = []
         boxes = zeros((L, D - 1, 2), dtype=int)
         MSE_array = []
+        activity = zeros((L, dims[0] / self.batchSize))
+        if self.initIters == 0 or self.downSample is None:
+            self.downSample = ones(D - 1, dtype=int)
+        else:
+            self.downSample = asarray(self.downSample, dtype=int)
 
         # Auxiliary functions
         def getBox(centers, R, dims):
@@ -313,156 +216,212 @@ class LocalNMFBlockAlgorithm(object):
             #  X : array, shape (T, prod(diff(box,1))), Input
             # Returns
             #  Z : array, shape (T, X, Y[, Z]), Z+X on box region
-            temp = list(map(lambda a: range(*a), box))
-            Z[ix_(*([range(len(Z))] + temp))] += reshape(X, (r_[-1, box[:, 1] - box[:, 0]]))
+            Z[[slice(len(Z))] + list(map(lambda a: slice(*a), box))
+              ] += reshape(X, (r_[-1, box[:, 1] - box[:, 0]]))
             return Z
 
-        def regionCut(X, box, *args):
+        def regionCut(X, box):
             # Parameters
             #  X : array, shape (T, X, Y[, Z])
             #  box : array, shape (D, 2), region to cut
-            #  args : tuple, specificy dimensions of whole picture (optional)
             # Returns
             #  res : array, shape (T, prod(diff(box,1))),
             dims = X.shape
-            if len(args) > 0:
-                dims = args[0]
-            if len(dims) - 1 != len(box):
-                raise Exception('box has the wrong number of dimensions')
-            return X[ix_(*([list(range(dims[0]))] + list(map(lambda a: range(*a), box))))].reshape((dims[0], -1))
+            return X[[slice(dims[0])] + list(map(lambda a: slice(*a), box))].reshape((dims[0], -1))
 
-    # Initialize shapes as Gaussians
-        for ll in range(L):
-            boxes[ll] = getBox(centers[ll], R, dims[1:])
-            tmp = [(arange(dims[i + 1]) - centers[ll][i]) ** 2 / (2. * self.sig[i])
-                   for i in range(D - 1)]
-            tmp = exp(-sum(ix_(*tmp)))
-            tmp.shape = (1,) + dims[1:]
-            tmp = regionCut(tmp, boxes[ll])
-            shapes.append(tmp[0])
-        residual = data.copy()
-    # Initialize background as 30% percentile
-        if self.adaptBackground:
-            b_t = ones(len(residual))
-            b_s = percentile(residual, 30, 0).reshape(-1)
-            residual -= outer(b_t, b_s).reshape(dims)
-    # Initialize activity, iteratively remove background
-        for _ in range(5):
-            # (Re)calculate activity based on data-background and Gaussian shapes
-            for ll in range(L):
-                X = regionCut(residual, boxes[ll])
-                activity[ll] = dot(X, shapes[ll]) / dot(shapes[ll], shapes[ll])
-                if self.nonNegative:
-                    activity[ll][activity[ll] < 0] = 0
-        # (Re)calculate background based on data-sources using nonnegative greedy PCA
-            residual = data.copy()
-            for ll in range(L):
-                residual = regionAdd(residual, -outer(activity[ll], shapes[ll]), boxes[ll])
-            if not self.adaptBackground:
-                break
-            residual.shape = (dims[0], -1)
-            b_s = dot(residual.T, b_t) / dot(b_t, b_t)
-            b_s[b_s < 0] = 0
-            b_t = dot(residual, b_s) / dot(b_s, b_s)
-            b_t[b_t < 0] = 0
-            residual -= outer(b_t, b_s)
-            residual.shape = dims
+        def GetSnPSD(Y):  # Estimate noise level
+            L = len(Y)
+            ff, psd_Y = welch(Y, nperseg=round(L / 8))
+            sn = sqrt(mean(psd_Y[ff > .3] / 2))
+            return sn
+        noise = zeros(L)
 
-    # Main Loop
-        delete = []
-        for kk in range(self.maxIter):
-            for ll in range(L):
-                if ll in delete:
-                    continue
-                # Add region
-                residual = regionAdd(residual, outer(activity[ll], shapes[ll]), boxes[ll])
-
-                # Cut region
-                X = regionCut(residual, boxes[ll])
-
-                # nonnegative greedy PCA
-                greedy_pca_iterations = 5
-                for _ in range(greedy_pca_iterations):
-                    activity[ll] = nan_to_num(dot(X, shapes[ll]) / dot(shapes[ll], shapes[ll]))
+        def HALS(data, S, activity, skip=[], check_skip=0, iters=1):
+            idx = asarray(filter(lambda x: x not in skip, range(len(activity))))
+            A = S[idx].dot(data.T)
+            B = S[idx].dot(S.T)
+            for ii in range(iters):
+                for k, ll in enumerate(idx):
+                    if check_skip and ii == iters - 1:
+                        a0 = activity[ll].copy()
+                    activity[ll] += nan_to_num((A[k] - dot(B[k], activity)) / B[k, ll])
                     if self.nonNegative:
                         activity[ll][activity[ll] < 0] = 0
-
-                    shapes[ll] = nan_to_num(
-                        dot(X.T, activity[ll]) / dot(activity[ll], activity[ll]))
+                # skip neurons whose shapes already converged
+                    if check_skip and ll < L and ii == iters - 1:
+                        if check_skip == 1:  # compute noise level only once
+                            noise[ll] = GetSnPSD(a0) / a0.mean()
+                        if allclose(a0, activity[ll] / activity[ll].mean(), 1e-4, noise[ll]):
+                            skip += [ll]
+            C = activity[idx].dot(data)
+            D = activity[idx].dot(activity.T)
+            for _ in range(iters):
+                for k, ll in enumerate(idx):
+                    if ll == L:
+                        S[ll] += nan_to_num((C[k] - dot(D[k], S)) / D[k, ll])
+                    else:
+                        S[ll, mask[ll]] += nan_to_num((C[k, mask[ll]]
+                                                       - dot(D[k], S[:, mask[ll]])) / D[k, ll])
                     if self.nonNegative:
-                        shapes[ll][shapes[ll] < 0] = 0
+                        S[ll][S[ll] < 0] = 0
+            return S, activity, skip
 
-                if all(shapes[ll] == 0):
-                    delete += [ll]
-                else:
-                    # Subtract region
-                    residual = regionAdd(residual, -outer(activity[ll], shapes[ll]), boxes[ll])
+        def HALSactivity(data, S, activity, iters=1):
+            A = S.dot(data.T)
+            B = S.dot(S.T)
+            for _ in range(iters):
+                for ll in range(L + self.adaptBackground):
+                    activity[ll] += nan_to_num((A[ll] - dot(B[ll].T, activity)) / B[ll, ll])
+                    if self.nonNegative:
+                        activity[ll][activity[ll] < 0] = 0
+            return activity
 
-            # Recalculate background
-            if self.adaptBackground:  # and kk % 5 == 0:
-                residual = data.copy()
+        def HALSshape(data, S, activity, iters=1):
+            C = activity.dot(data)
+            D = activity.dot(activity.T)
+            for _ in range(iters):
+                for ll in range(L + self.adaptBackground):
+                    if ll == L:
+                        S[ll] += nan_to_num((C[ll] - dot(D[ll], S)) / D[ll, ll])
+                    else:
+                        S[ll, mask[ll]] += nan_to_num((C[ll, mask[ll]]
+                                                       - dot(D[ll], S[:, mask[ll]])) / D[ll, ll])
+                    if self.nonNegative:
+                        S[ll][S[ll] < 0] = 0
+            return S
+
+    ### Initialize shapes, activity, and residual ###
+        data0 = data[:len(data) / self.batchSize * self.batchSize].reshape((-1, self.batchSize) +
+                                                                           data.shape[1:]).mean(1).astype(smallestFloatType(data.dtype))
+        if D == 4:
+            data0 = data0.reshape(len(data0), dims[1] / self.downSample[0], self.downSample[0],
+                                  dims[2] / self.downSample[1], self.downSample[1],
+                                  dims[3] / self.downSample[2], self.downSample[2])\
+                .mean(2).mean(3).mean(4)
+            activity = data0[:, map(int, centers[:, 0] / self.downSample[0]),
+                             map(int, centers[:, 1] / self.downSample[1]),
+                             map(int, centers[:, 2] / self.downSample[2])].T
+        else:
+            data0 = data0.reshape(len(data0), dims[1] / self.downSample[0],
+                                  self.downSample[0], dims[2] / self.downSample[1],
+                                  self.downSample[1]).mean(2).mean(3)
+            activity = data0[:, map(int, centers[:, 0] / self.downSample[0]),
+                             map(int, centers[:, 1] / self.downSample[1])].T
+        dims0 = data0.shape
+
+        data0 = data0.reshape(dims0[0], -1)
+        data = data.astype(smallestFloatType(data.dtype)).reshape(dims[0], -1)
+        for ll in range(L):
+            boxes[ll] = getBox(centers[ll] / self.downSample, R / self.downSample, dims0[1:])
+            temp = zeros(dims0[1:])
+            temp[map(lambda a: slice(*a), boxes[ll])] = 1
+            mask += where(temp.ravel())
+            temp = [(arange(dims[i + 1] / self.downSample[i]) - centers[ll][i] / float(self.downSample[i])) ** 2
+                    / (2 * (self.sig[i] / float(self.downSample[i])) ** 2)
+                    for i in range(D - 1)]
+            temp = exp(-sum(ix_(*temp)))
+            temp.shape = (1,) + dims0[1:]
+            temp = regionCut(temp, boxes[ll])
+            shapes.append(temp[0])
+        S = zeros((L + self.adaptBackground, prod(dims0[1:])), dtype=smallestFloatType(data.dtype))
+        for ll in range(L):
+            S[ll] = regionAdd(
+                zeros((1,) + dims0[1:]), shapes[ll].reshape(1, -1), boxes[ll]).ravel()
+        if self.adaptBackground:
+            # Initialize background as 20% percentile
+            S[-1] = percentile(data0, 20, 0)
+            activity = r_[activity, ones((1, dims0[0]), dtype=smallestFloatType(data.dtype))]
+
+    ### Get shape estimates on subset of data ###
+        if self.initIters > 0:
+            skip = []
+            for kk in range(self.initIters):
+                S = HALSshape(data0, S, activity)
+                activity = HALSactivity(data0, S, activity)
+
+        ### Back to full data ##
+            activity = ones((L + self.adaptBackground, dims[0]),
+                            dtype=smallestFloatType(data.dtype)) * activity.mean(1).reshape(-1, 1)
+            if D == 4:
+                S = repeat(repeat(repeat(S.reshape((-1,) + dims0[1:]), self.downSample[0], 1),
+                                  self.downSample[1], 2), self.downSample[2], 3).reshape(L + self.adaptBackground, -1)
+            else:
+                S = repeat(repeat(S.reshape((-1,) + dims0[1:]),
+                                  self.downSample[0], 1), self.downSample[1], 2).reshape(L + self.adaptBackground, -1)
+            for ll in range(L):
+                boxes[ll] = getBox(centers[ll], R, dims[1:])
+                temp = zeros(dims[1:])
+                temp[map(lambda a: slice(*a), boxes[ll])] = 1
+                mask[ll] = asarray(where(temp.ravel())[0])
+
+            activity = HALSactivity(data, S, activity, 7)
+            S = HALSshape(data, S, activity, 7)
+
+    #### Main Loop ####
+        skip = []
+        com = zeros_like(centers)
+        for kk in range(self.iters):
+            S, activity, skip = HALS(data, S, activity, skip, iters=10)  # , check_skip=kk)
+            if kk == 0 and self.optimizeCenters:
+                # Recenter
                 for ll in range(L):
-                    if ll in delete:
-                        continue
-                    residual = regionAdd(residual, -outer(activity[ll], shapes[ll]), boxes[ll])
-                residual.shape = (dims[0], -1)
-                for _ in range(greedy_pca_iterations):
-                    b_s = dot(residual.T, b_t) / dot(b_t, b_t)
-                    b_s[b_s < 0] = 0
-                    b_t = dot(residual, b_s) / dot(b_s, b_s)
-                    b_t[b_t < 0] = 0
-                residual -= outer(b_t, b_s)
-                residual.shape = dims
-
-            # Recenter
-            if self.optimizeCenters and kk % 30 == 20:
-                for ll in range(L):
-                    if ll in delete:
-                        continue
-                    if shapes[ll].max() > .3 * norm(shapes[ll]):  # remove single bright pixel
-                        delete += [ll]
-                        residual = regionAdd(residual, outer(activity[ll], shapes[ll]), boxes[ll])
-                        continue
-                    shp = shapes[ll].reshape(ravel(diff(boxes[ll])))
-                    com = boxes[ll][:, 0] + round(center_of_mass(shp))
-                    # remove if center of mass >3x sigma away
-                    if norm(((com - centers[ll])[self.sig > 0]).astype(float) / self.sig[self.sig > 0]) > 3:
-                        delete += [ll]
-                        residual = regionAdd(residual, outer(activity[ll], shapes[ll]), boxes[ll])
-                        continue
-                    newbox = getBox(com, R, dims[1:])
+                    # if S[ll].max() > .3 * norm(S[ll]):  # remove single bright pixel
+                    #     purge += [ll]
+                    #     continue
+                    shp = S[ll].reshape(dims[1:])
+                    com[ll] = center_of_mass(shp)
+                    newbox = getBox(round(com[ll]), R, dims[1:])
                     if any(newbox != boxes[ll]):
-                        newshape = zeros(ravel(diff(newbox)))
-                        lower = vstack([newbox[:, 0], boxes[ll][:, 0]]).max(0)
-                        upper = vstack([newbox[:, 1], boxes[ll][:, 1]]).min(0)
-                        newshape[ix_(*map(lambda a: range(*a),
-                                          asarray([lower - newbox[:, 0], upper - newbox[:, 0]]).T))] = \
-                            shp[ix_(*map(lambda a: range(*a),
-                                         asarray([lower - boxes[ll][:, 0], upper - boxes[ll][:, 0]]).T))]
-                        residual = regionAdd(residual, outer(activity[ll], shapes[ll]), boxes[ll])
-                        shapes[ll] = newshape.reshape(-1)
+                        tmp = regionCut(asarray([shp]), newbox)
+                        S[ll] = regionAdd(zeros((1,) + dims[1:]),
+                                          tmp.reshape(1, -1), newbox).ravel()
                         boxes[ll] = newbox
-                        residual = regionAdd(residual, -outer(activity[ll], shapes[ll]), boxes[ll])
+                        temp = zeros(dims[1:])
+                        temp[map(lambda a: slice(*a), boxes[ll])] = 1
+                        mask[ll] = where(temp.ravel())[0]
+                # corr = corrcoef(activity)
+                # Purge to merge split neurons
+                purge = []
+                for l in range(L - 1):
+                    if l in purge:
+                        continue
+                    for k in range(l + 1, L):
+                        # if corr[l, k] > .95 and norm((com[l] - com[k]) / asarray(sig)) < 1:
+                        if norm((com[l] - com[k]) / asarray(self.sig)) < 1:
+                            purge += [k]
+                            if self.verbose:
+                                print 'purged', k, 'in favor of ', l
+                idx = filter(lambda x: x not in purge, range(L))
+                mask = asarray(mask)[idx]
+                if self.adaptBackground:
+                    idx = asarray(idx + [L])
+                S = S[idx]
+                activity = activity[idx]
+                L = len(mask)
+                skip = []
 
             # Measure MSE
-            MSE = dot(residual.ravel(), residual.ravel())
             if self.verbose:
-                print('{0:1d}: MSE = {1:.3f}'.format(kk, MSE))
-            if kk > 0 and abs(1 - MSE / MSE_array[-1]) < self.tol:
-                break
-            if kk == (self.maxIter - 1):
-                print('Maximum iteration limit reached')
-            MSE_array.append(MSE)
+                residual = data - activity.T.dot(S)
+                MSE = dot(residual.ravel(), residual.ravel()) / data.size
+                print('{0:1d}: MSE = {1:.5f}'.format(kk, MSE))
+                if kk == (self.iters - 1):
+                    print('Maximum iteration limit reached')
+                MSE_array.append(MSE)
 
         # change format from shapes and boxes to Sources
         s = []
         a = []
         for ll in range(L):
-            if (not inImgSlice[ll] and not returnPadded) or all(shapes[ll] == 0) or ll in delete:
+            if (not inImgSlice[ll] and not returnPadded) or all(shapes[ll] == 0):
                 continue
-            coord = asarray(
-                where(reshape(shapes[ll], diff(boxes[ll])) > 0)).T + boxes[ll][:, 0]
+            coord = asarray(where(S[ll].reshape(dims[1:]) > 0)).T
             coord += asarray([p.start for p in pIS])
-            s += [Source(coord, shapes[ll][shapes[ll] > 0])]
-            a += [activity[ll]]
-        return key, (s, asarray(a))
+            n = norm(S[ll])
+            s += [Source(coord, S[ll][S[ll] > 0] / n)]
+            a += [activity[ll] * n]
+        if self.adaptBackground:
+            n = S[-1].mean()
+            return key, (s, asarray(a), S[-1].reshape(dims[1:]) / n, activity[-1] * n)
+        else:
+            return key, (s, asarray(a))
