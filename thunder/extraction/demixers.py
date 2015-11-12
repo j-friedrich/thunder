@@ -62,7 +62,7 @@ class Demixer(object):
                                                              for s in sources])[::-1]]))
         except AttributeError:  # if sources don't have values
             centers_b = blocks.rdd.context.broadcast(sources.centers)
-        result = blocks.apply(lambda x: algorithm.demix(x, centers_b, False))
+        result = blocks.apply(lambda x: algorithm.demix(x, centers_b, False)).cache()
         if len(result.values().first()) == 2:
             return TimeSeries(result.values().flatMap(lambda x: zip(x[0], x[1])))
         else:
@@ -100,7 +100,6 @@ class LocalNMFBlockAlgorithm(object):
 
     optimizeCenters : boolean, optional, default = False
         If true, update centers to be center of mass for each source
-        and prune wrongly suspected sources
 
     initIters : list, optional, default = 80
         Numbers of initial iterations on downsampled data
@@ -108,13 +107,17 @@ class LocalNMFBlockAlgorithm(object):
     batchSize : int, optional, default = 30
         Number of frames over which mean is taken in initial iterations
 
-    downSample : tuple, shape (D,)
+    downSample : tuple, shape (D,), optional, default = None, i.e. no downsampling
         Factor for spatial downsampling in different spatial directions
+
+    thresh : float, optional, default = None, i.e. no merging
+        threshold for merging neurons; merge occurs if MSE between the two
+        considered NMF-components and the merged one is below threshold
     """
 
-    def __init__(self, sig, nonNegative=True, tol=1e-6, iters=10, verbose=False,
+    def __init__(self, sig, nonNegative=True, tol=1e-6, iters=2, verbose=False,
                  registration=False, adaptBackground=True, optimizeCenters=False,
-                 initIters=80, batchSize=30, downSample=None):
+                 initIters=80, batchSize=30, downSample=None, thresh=None):
         self.sig = asarray(sig)
         self.nonNegative = nonNegative
         self.tol = tol
@@ -126,6 +129,7 @@ class LocalNMFBlockAlgorithm(object):
         self.initIters = initIters
         self.batchSize = batchSize
         self.downSample = downSample
+        self.thresh = thresh
 
     # main function
     def demix(self, block, allcenters, returnPadded=False):
@@ -151,11 +155,13 @@ class LocalNMFBlockAlgorithm(object):
                 temporal background activity
 
         """
-        from numpy import sum, zeros, ones, asarray, reshape, r_, ix_, exp, arange, mean, dot, prod,\
-            where, max, nan_to_num, round, any, percentile, sqrt, allclose, repeat, zeros_like
+        from numpy import sum, zeros, ones, asarray, reshape, r_, ix_, exp, arange, mean,\
+            where, max, nan_to_num, round, any, percentile, sqrt, allclose, repeat, \
+            unravel_index, isnan, argmax, unique, hstack, outer, dot, prod
         from numpy.linalg import norm
         from scipy.ndimage.measurements import center_of_mass
         from scipy.signal import welch
+        from scipy.ndimage import median_filter
         from thunder.extraction.source import Source
 
         # Initialize Parameters
@@ -188,17 +194,18 @@ class LocalNMFBlockAlgorithm(object):
         dims = data.shape
         D = len(dims)
         # size of bounding box is 3 times size of source
-        R = 3 * self.sig
+        R = (3 * self.sig).astype('uint8')
         L = len(centers)
         shapes = []
         mask = []
-        boxes = zeros((L, D - 1, 2), dtype=int)
+        boxes = zeros((L, D - 1, 2), dtype='uint16')
         MSE_array = []
         activity = zeros((L, dims[0] / self.batchSize))
         if self.initIters == 0 or self.downSample is None:
-            self.downSample = ones(D - 1, dtype=int)
+            self.downSample = ones(D - 1, dtype='uint8')
         else:
-            self.downSample = asarray(self.downSample, dtype=int)
+            self.downSample = asarray(self.downSample, dtype='uint8')
+        ds = self.downSample
 
         # Auxiliary functions
         def getBox(centers, R, dims):
@@ -229,7 +236,7 @@ class LocalNMFBlockAlgorithm(object):
             dims = X.shape
             return X[[slice(dims[0])] + list(map(lambda a: slice(*a), box))].reshape((dims[0], -1))
 
-        def GetSnPSD(Y):  # Estimate noise level
+        def getSnPSD(Y):  # Estimate noise level
             L = len(Y)
             ff, psd_Y = welch(Y, nperseg=round(L / 8))
             sn = sqrt(mean(psd_Y[ff > .3] / 2))
@@ -250,7 +257,7 @@ class LocalNMFBlockAlgorithm(object):
                 # skip neurons whose shapes already converged
                     if check_skip and ll < L and ii == iters - 1:
                         if check_skip == 1:  # compute noise level only once
-                            noise[ll] = GetSnPSD(a0) / a0.mean()
+                            noise[ll] = getSnPSD(a0) / a0.mean()
                         if allclose(a0, activity[ll] / activity[ll].mean(), 1e-4, noise[ll]):
                             skip += [ll]
             C = activity[idx].dot(data)
@@ -290,34 +297,117 @@ class LocalNMFBlockAlgorithm(object):
                         S[ll][S[ll] < 0] = 0
             return S
 
+        def recenter(S, boxes, mask, ds):
+            dim = dims[1:] / ds
+            for ll in range(len(boxes)):
+                com = center_of_mass(S[ll].reshape(dim))
+                # com = unravel_index(argmax(median_filter(S[ll].reshape(dim), 3)), dim)
+                if isnan(com[0]) or norm((asarray(com) - boxes[ll].mean(1)) * ds / self.sig)>1:
+                    continue
+                newbox = getBox(round(com), R / ds, dim)
+                if any(newbox != boxes[ll]):
+                    temp = zeros(dim)
+                    temp[map(lambda a: slice(*a), newbox)] = 1
+                    mask[ll] = where(temp.ravel())[0]
+                    S[ll] *= temp.ravel()
+                    boxes[ll] = newbox
+            return S, boxes, mask
+
+        def mergeAll(S, activity, boxes, mask, L, ds):
+            dim = dims[1:] / ds
+
+            def merge(S, activity, boxes, mask, i, j, purge):
+                # determine merged component
+                sCombined = (S[i] / norm(S[i]) + S[j] / norm(S[j]))
+                aCombined = ((activity[i] * norm(S[i]) + activity[j] * norm(S[j])) / 2.)
+                sa = outer(activity[i], S[i]) + outer(activity[j], S[j])
+                for _ in range(3):
+                    A = sCombined.dot(sa.T)
+                    B = sCombined.dot(sCombined)
+                    aCombined = nan_to_num(A / B)
+                    if self.nonNegative:
+                        aCombined[aCombined < 0] = 0
+                    C = aCombined.dot(sa)
+                    D = aCombined.dot(aCombined)
+                    sCombined = nan_to_num(C / D)
+                    if self.nonNegative:
+                        sCombined[sCombined < 0] = 0
+                shp = sCombined.reshape(dim)
+                com = center_of_mass(shp)
+                newbox = getBox(round(com), R / ds, dim)
+                temp = zeros(dim)
+                temp[map(lambda a: slice(*a), newbox)] = 1
+                newmask = where(temp.ravel())[0]
+            # calc MSE
+                qq = 0
+                for k in newmask:
+                    tmp = aCombined * sCombined[k] - sa[:, k]
+                    qq += tmp.dot(tmp)
+                for k in filter(lambda a: a not in newmask, unique(hstack([mask[i], mask[j]]))):
+                    qq += sa[:, k].dot(sa[:, k])
+            # merge only if MSE is smaller than some threshold
+                if qq < self.thresh * len(newmask) * len(aCombined):  # * sqrt(sa.mean()):
+                    S[i] = sCombined * temp.ravel()
+                    boxes[i] = newbox
+                    mask[i] = newmask
+                    activity[i] = aCombined
+                    purge += [j]
+                    if self.verbose:
+                        print 'merged', i, 'and ', j
+                return S, activity, boxes, mask, purge
+            purge = []
+            com = zeros((L, D - 1))
+            for ll in range(L):
+                com[ll] = center_of_mass(S[ll].reshape(dim))
+                if isnan(com[ll, 0]):
+                    purge += [ll]
+            # com = boxes.mean(2)
+            for l in range(L - 1):
+                if l in purge:
+                    continue
+                for k in range(l + 1, L):
+                    if k not in purge and norm((com[l] - com[k]) / asarray(self.sig / ds)) < 2:
+                        S, activity, boxes, mask, purge = merge(
+                            S, activity, boxes, mask, l, k, purge)
+            idx = filter(lambda x: x not in purge, range(L))
+            mask = asarray(mask)[idx]
+            boxes = asarray(boxes)[idx]
+            if self.adaptBackground:
+                idx = asarray(idx + [L])
+            S = S[idx]
+            activity = activity[idx]
+            L = len(mask)
+            return S, activity, boxes, mask, L
+
     ### Initialize shapes, activity, and residual ###
         data0 = data[:len(data) / self.batchSize * self.batchSize].reshape((-1, self.batchSize) +
                                                                            data.shape[1:]).mean(1).astype(smallestFloatType(data.dtype))
         if D == 4:
-            data0 = data0.reshape(len(data0), dims[1] / self.downSample[0], self.downSample[0],
-                                  dims[2] / self.downSample[1], self.downSample[1],
-                                  dims[3] / self.downSample[2], self.downSample[2])\
+            data0 = data0.reshape(len(data0), dims[1] / ds[0], ds[0],
+                                  dims[2] / ds[1], ds[1],
+                                  dims[3] / ds[2], ds[2])\
                 .mean(2).mean(3).mean(4)
-            activity = data0[:, map(int, centers[:, 0] / self.downSample[0]),
-                             map(int, centers[:, 1] / self.downSample[1]),
-                             map(int, centers[:, 2] / self.downSample[2])].T
+            activity = data0[:, map(int, centers[:, 0] / ds[0]),
+                             map(int, centers[:, 1] / ds[1]),
+                             map(int, centers[:, 2] / ds[2])].T
         else:
-            data0 = data0.reshape(len(data0), dims[1] / self.downSample[0],
-                                  self.downSample[0], dims[2] / self.downSample[1],
-                                  self.downSample[1]).mean(2).mean(3)
-            activity = data0[:, map(int, centers[:, 0] / self.downSample[0]),
-                             map(int, centers[:, 1] / self.downSample[1])].T
+            data0 = data0.reshape(len(data0), dims[1] / ds[0],
+                                  ds[0], dims[2] / ds[1],
+                                  ds[1]).mean(2).mean(3)
+            activity = data0[:, map(int, centers[:, 0] / ds[0]),
+                             map(int, centers[:, 1] / ds[1])].T
         dims0 = data0.shape
 
         data0 = data0.reshape(dims0[0], -1)
         data = data.astype(smallestFloatType(data.dtype)).reshape(dims[0], -1)
         for ll in range(L):
-            boxes[ll] = getBox(centers[ll] / self.downSample, R / self.downSample, dims0[1:])
+            boxes[ll] = getBox(centers[ll] / ds, R / ds, dims0[1:])
             temp = zeros(dims0[1:])
             temp[map(lambda a: slice(*a), boxes[ll])] = 1
             mask += where(temp.ravel())
-            temp = [(arange(dims[i + 1] / self.downSample[i]) - centers[ll][i] / float(self.downSample[i])) ** 2
-                    / (2 * (self.sig[i] / float(self.downSample[i])) ** 2)
+            temp = [(arange(dims[i + 1] / ds[i]) - centers[ll][i]
+                     / float(ds[i])) ** 2
+                    / (2 * (self.sig[i] / float(ds[i])) ** 2)
                     for i in range(D - 1)]
             temp = exp(-sum(ix_(*temp)))
             temp.shape = (1,) + dims0[1:]
@@ -334,22 +424,26 @@ class LocalNMFBlockAlgorithm(object):
 
     ### Get shape estimates on subset of data ###
         if self.initIters > 0:
-            skip = []
             for kk in range(self.initIters):
                 S = HALSshape(data0, S, activity)
                 activity = HALSactivity(data0, S, activity)
+                if kk > 30:
+                    if kk % 20 == 0 and self.optimizeCenters:
+                        S, boxes, mask = recenter(S, boxes, mask, ds)
+                    if kk % 20 == 5 and self.thresh is not None:
+                        S, activity, boxes, mask, L = mergeAll(S, activity, boxes, mask, L, ds)
 
         ### Back to full data ##
             activity = ones((L + self.adaptBackground, dims[0]),
                             dtype=smallestFloatType(data.dtype)) * activity.mean(1).reshape(-1, 1)
             if D == 4:
-                S = repeat(repeat(repeat(S.reshape((-1,) + dims0[1:]), self.downSample[0], 1),
-                                  self.downSample[1], 2), self.downSample[2], 3).reshape(L + self.adaptBackground, -1)
+                S = repeat(repeat(repeat(S.reshape((-1,) + dims0[1:]), ds[0], 1),
+                                  ds[1], 2), ds[2], 3).reshape(L + self.adaptBackground, -1)
             else:
                 S = repeat(repeat(S.reshape((-1,) + dims0[1:]),
-                                  self.downSample[0], 1), self.downSample[1], 2).reshape(L + self.adaptBackground, -1)
+                                  ds[0], 1), ds[1], 2).reshape(L + self.adaptBackground, -1)
             for ll in range(L):
-                boxes[ll] = getBox(centers[ll], R, dims[1:])
+                boxes[ll] *= ds.reshape(-1, 1)
                 temp = zeros(dims[1:])
                 temp[map(lambda a: slice(*a), boxes[ll])] = 1
                 mask[ll] = asarray(where(temp.ravel())[0])
@@ -359,46 +453,8 @@ class LocalNMFBlockAlgorithm(object):
 
     #### Main Loop ####
         skip = []
-        com = zeros_like(centers)
         for kk in range(self.iters):
             S, activity, skip = HALS(data, S, activity, skip, iters=10)  # , check_skip=kk)
-            if kk == 0 and self.optimizeCenters:
-                # Recenter
-                for ll in range(L):
-                    # if S[ll].max() > .3 * norm(S[ll]):  # remove single bright pixel
-                    #     purge += [ll]
-                    #     continue
-                    shp = S[ll].reshape(dims[1:])
-                    com[ll] = center_of_mass(shp)
-                    newbox = getBox(round(com[ll]), R, dims[1:])
-                    if any(newbox != boxes[ll]):
-                        tmp = regionCut(asarray([shp]), newbox)
-                        S[ll] = regionAdd(zeros((1,) + dims[1:]),
-                                          tmp.reshape(1, -1), newbox).ravel()
-                        boxes[ll] = newbox
-                        temp = zeros(dims[1:])
-                        temp[map(lambda a: slice(*a), boxes[ll])] = 1
-                        mask[ll] = where(temp.ravel())[0]
-                # corr = corrcoef(activity)
-                # Purge to merge split neurons
-                purge = []
-                for l in range(L - 1):
-                    if l in purge:
-                        continue
-                    for k in range(l + 1, L):
-                        # if corr[l, k] > .95 and norm((com[l] - com[k]) / asarray(sig)) < 1:
-                        if norm((com[l] - com[k]) / asarray(self.sig)) < 1:
-                            purge += [k]
-                            if self.verbose:
-                                print 'purged', k, 'in favor of ', l
-                idx = filter(lambda x: x not in purge, range(L))
-                mask = asarray(mask)[idx]
-                if self.adaptBackground:
-                    idx = asarray(idx + [L])
-                S = S[idx]
-                activity = activity[idx]
-                L = len(mask)
-                skip = []
 
             # Measure MSE
             if self.verbose:

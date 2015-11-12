@@ -13,12 +13,14 @@ class SourceExtraction(object):
         from thunder.extraction.block.methods.sima import BlockSIMA
         from thunder.extraction.block.methods.sparsegaussian import BlockSparseGaussian
         from thunder.extraction.feature.methods.localmax import LocalMax
+        from thunder.extraction.feature.methods.iteratedlocalmax import IteratedLocalMax
 
         EXTRACTION_METHODS = {
             'nmf': BlockNMF,
             'localmax': LocalMax,
             'sima': BlockSIMA,
-            'sparsegaussian': BlockSparseGaussian
+            'sparsegaussian': BlockSparseGaussian,
+            'iteratedlocalmax': IteratedLocalMax
         }
 
         checkParams(method, EXTRACTION_METHODS.keys())

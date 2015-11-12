@@ -32,7 +32,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     tol : float, optional, default = .01
         Tolerance for stopping FISTA
 
-    maxIter : int, optional, default = 20
+    maxIter : int, optional, default = 30
         Maximum number of iterations
 
     nonNegative : boolean, optional, default = True
@@ -63,13 +63,16 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
     registration : boolean, optional, default = False
         Blockwise registration using crosscorrelation if true
 
-    batchSize : int, optional, default = 10
+    batchSize : int, optional, default = 30
         Number of frames over which max is taken prior to Gaussian group lasso
+
+    brThresh : int, optional, default = 120
+        Brightness threshold to determine regions with cells
     """
 
-    def __init__(self, sig, lam=1., tol=1e-2, maxIter=20, nonNegative=True, targetAreaRatio=[],
+    def __init__(self, sig, lam=1., tol=1e-2, maxIter=30, nonNegative=True, targetAreaRatio=[],
                  method='percentile', perc=98, minDistance=3, adaptBackground=True,
-                 getROI=False, verbose=False, registration=False, batchSize=10, **extra):
+                 getROI=False, verbose=False, registration=False, batchSize=30, brThresh=120, **extra):
         checkParams(method, ['mean', 'stdev', 'percentile'])
         self.sig = sig
         self.lam = lam
@@ -85,6 +88,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
         self.verbose = verbose
         self.registration = registration
         self.batchSize = batchSize
+        self.bThresh = brThresh
 
     def extract(self, block):
         from numpy import zeros, ones, maximum, shape, std, sum, percentile, dot, outer,\
@@ -270,7 +274,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
             # apply the local maximum filter
             from skimage.feature import peak_local_max
             peaks = peak_local_max(im, min_distance=self.minDistance,
-                                   threshold_rel=.03, exclude_border=False).T
+                                   threshold_rel=.03).T
             magnitude = im[list(peaks)]
             indices = argsort(magnitude)[::-1]
             peaks = asarray(list(peaks[:, indices]) + [magnitude[indices]]).T
@@ -288,6 +292,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
             block = asarray(map(lambda im:
                                 shift(im, computeDisplacement(ref, im), mode='nearest'), block))
 
+        bImg = block.mean(0) > self.bThresh
         if self.batchSize > 1:
             block = block[:int(len(block) / self.batchSize) *
                           self.batchSize].reshape((-1, self.batchSize) + block.shape[1:]).max(1)
@@ -301,7 +306,7 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
             im_x = std(x, 0)
         elif self.method == 'percentile':
             im_x = percentile(x, self.perc, 0)
-        cent = getCenters(im_x)
+        cent = getCenters(im_x * bImg)
         if self.getROI:
             # ROI around each center, using watersheding on non-zero regions
             roi = getROI(im_x,  cent[:, :-1])

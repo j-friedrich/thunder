@@ -23,3 +23,14 @@ class StdevFeatureCreator(FeatureCreator):
             return data.stdev()
         elif isinstance(data, Series):
             return data.seriesStdev().pack()
+
+
+class MaxFeatureCreator(FeatureCreator):
+    """
+    Compute the maximum across images for every pixel
+    """
+    def create(self, data):
+        if isinstance(data, Images):
+            return data.max()
+        elif isinstance(data, Series):
+            return data.seriesMax().pack()
