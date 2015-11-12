@@ -306,7 +306,10 @@ class SparseGaussianBlockAlgorithm(BlockAlgorithm):
             im_x = std(x, 0)
         elif self.method == 'percentile':
             im_x = percentile(x, self.perc, 0)
-        cent = getCenters(im_x * bImg)
+        tmp = im_x * bImg
+        if tmp.max()==0:
+            return []
+        cent = getCenters(tmp)
         if self.getROI:
             # ROI around each center, using watersheding on non-zero regions
             roi = getROI(im_x,  cent[:, :-1])

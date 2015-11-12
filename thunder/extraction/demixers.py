@@ -302,7 +302,7 @@ class LocalNMFBlockAlgorithm(object):
             for ll in range(len(boxes)):
                 com = center_of_mass(S[ll].reshape(dim))
                 # com = unravel_index(argmax(median_filter(S[ll].reshape(dim), 3)), dim)
-                if isnan(com[0]) or norm((asarray(com) - boxes[ll].mean(1)) * ds / self.sig)>1:
+                if isnan(com[0]) or norm((asarray(com) - boxes[ll].mean(1)) * ds / self.sig) > 1:
                     continue
                 newbox = getBox(round(com), R / ds, dim)
                 if any(newbox != boxes[ll]):
@@ -442,6 +442,7 @@ class LocalNMFBlockAlgorithm(object):
             else:
                 S = repeat(repeat(S.reshape((-1,) + dims0[1:]),
                                   ds[0], 1), ds[1], 2).reshape(L + self.adaptBackground, -1)
+            mask = [[]] * L
             for ll in range(L):
                 boxes[ll] *= ds.reshape(-1, 1)
                 temp = zeros(dims[1:])
