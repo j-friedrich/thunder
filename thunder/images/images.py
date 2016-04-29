@@ -320,9 +320,9 @@ class Images(Data):
         """
         if self.mode == 'spark':
             from thunder.images.readers import fromrdd
-            decimated = self.tordd().map(lambda (k, v): (int(k[0]) / factor, (v, 1)))
+            decimated = self.tordd().map(lambda k, v: (int(k[0]) / factor, (v, 1)))
             decimated = decimated.reduceByKey(lambda x, y: (x[0] + y[0], x[1] + y[1]))
-            decimated = decimated.map(lambda (k, v): (k, (v[0] / float(v[1])))).sortByKey()
+            decimated = decimated.map(lambda k, v: (k, (v[0] / float(v[1])))).sortByKey()
             return fromrdd(decimated)
         else:
             from thunder.images.readers import fromarray
